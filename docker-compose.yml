@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # --- Сервис Ollama (Текстовая нейросеть для Саммари) ---
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai_bot_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_NUM_PARALLEL=2 # Позволит обрабатывать до 2 запросов параллельно
+
+  # --- Сервис Faster-Whisper (Распознавание речи, оптимизированное под CPU) ---
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    container_name: ai_bot_whisper
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./whisper_models:/root/.cache/huggingface
+    environment:
+      - WHISPER_MODEL=small # Начнем с модели 'small' — оптимально для скорости на CPU
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=int8 # Важно: 8-битное сжатие, чтобы процессор не «умирал»
+# --- Очередь задач (Брокер сообщений) ---
+  redis:
+    image: redis:7-alpine
+    container_name: ai_bot_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis_data:/data
+
+  # --- База данных (Пользователи, подписки, баланс минут) ---
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai_bot_postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=bot_admin
+      - POSTGRES_PASSWORD=SuperSecurePass123!   # Можешь поменять на свой
+      - POSTGRES_DB=ai_voice_bot_db
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data

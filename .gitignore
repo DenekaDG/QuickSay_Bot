@@ -1,0 +1,22 @@
+# Конфиги с секретами и токенами
+config.py
+.env
+
+# Виртуальное окружение Python
+venv/
+__pycache__/
+*.pyc
+
+# Папка с временными медиафайлами
+downloads/
+
+# Локальные данные Docker (если есть)
+postgres_data/
+redis_data/
+ollama_data/
+whisper_models/
+
+# Логи и скрытые папки системы/редакторов
+*.log
+.vscode/
+.DS_Store

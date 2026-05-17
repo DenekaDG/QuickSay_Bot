@@ -1,0 +1,8 @@
+postgres_data/
+redis_data/
+downloads/
+venv/
+__pycache__/
+*.mp4
+*.ogg
+.git/

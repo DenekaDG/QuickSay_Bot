@@ -1,8 +1,9 @@
 import os
 import logging
+import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from psycopg2.pool import ThreadedConnectionPool
 
 # Импортируем параметры твоей базы данных напрямую
@@ -17,7 +18,9 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-DOWNLOAD_DIR = "downloads"
+# Задаем жесткий абсолютный путь внутри контейнера Docker (/app/downloads)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 # 3. Упаковка параметров для psycopg2 в словарь
@@ -93,6 +96,15 @@ async def cmd_start(message: Message):
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message):
+    """Вызов меню выбора стилей и языков в любой момент сессии"""
+    settings_text = (
+        "⚙️ <b>Настройки стилей и перевода QuickSay</b>\n\n"
+        "Выбери режим, в котором ИИ должен обрабатывать твои голосовые сообщения и кружочки:"
+    )
+    await message.answer(settings_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+
 # Меню выбора языков перевода
 @dp.callback_query(F.data == "open_languages")
 async def open_languages_menu(callback: CallbackQuery):
@@ -137,8 +149,8 @@ async def process_style_callback(callback: CallbackQuery):
         "lang_de": "🇩🇪 Перевод на немецкий",
         "lang_pl": "🇵🇱 Перевод на польский",
         "lang_es": "🇪🇸 Перевод на испанский",
-        "lang_fr": "🇫🇷 Перевод на французский",
-        "lang_it": "🇮🇹 Перевод на итальянский"
+        "fr": "🇫🇷 Перевод на французский",
+        "it": "🇮🇹 Перевод на итальянский"
     }
     
     selected_title = style_titles.get(style_name, "💼 Бизнес-ассистент")
@@ -152,7 +164,8 @@ async def process_style_callback(callback: CallbackQuery):
         cur.close()
         
         await callback.answer(f"Выбран стиль: {selected_title}")
-        await callback.message.answer(f"🎯 <b>Готово!</b> Теперь все файлы я обрабатываю в стиле: <b>{selected_title}</b>.")
+        # Исправлено: parse_mode изменен на верхний регистр "HTML", чтобы aiogram не игнорировал теги
+        await callback.message.answer(f"🎯 <b>Готово!</b> Теперь все файлы я обрабатываю в стиле: <b>{selected_title}</b>.", parse_mode="HTML")
     except Exception as e:
         logger.error(f"Ошибка смены стиля для {user_id}: {e}")
         await callback.answer("❌ Ошибка при смене стиля.")
@@ -216,6 +229,28 @@ async def handle_media(message: Message):
     process_audio_task.delay(file_path_on_server, user_id, user_style)
     await message.answer("⏳ Задача добавлена в очередь обработки. Скоро прилетит ответ!")
 
+async def set_main_menu(bot_instance: Bot):
+    """Добавляет официальную кнопку меню в интерфейс Telegram"""
+    commands = [
+        BotCommand(command="/start", description="⚙️ Инструкции"),
+        BotCommand(command="/settings", description="⚙️ Выбор режима")
+    ]
+    await bot_instance.set_my_commands(commands)
+
+async def main():
+    logger.info("🚀 Запуск основного процесса бота QuickSay...")
+    
+    # Автоматически регистрируем кнопку меню в интерфейсе Telegram
+    await set_main_menu(bot)
+    
+    # Очищаем старые зависшие обновления в Telegram, чтобы бот не спамил старыми ответами
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем поллинг, передавая бота внутрь диспетчера
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    logger.info("🚀 Бот QuickSay успешно запущен.")
-    dp.run_polling(bot)
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("🛑 Бот успешно остановлен.")

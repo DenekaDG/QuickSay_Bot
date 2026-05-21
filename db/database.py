@@ -20,6 +20,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             telegram_id BIGINT PRIMARY KEY,
             username VARCHAR(255),
+            first_name VARCHAR(255),
+            last_name VARCHAR(255),
+            ai_style VARCHAR(50) DEFAULT 'summary',
             balance_minutes INT DEFAULT 15,
             is_premium BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

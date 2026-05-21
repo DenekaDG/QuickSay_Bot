@@ -15,11 +15,11 @@ services:
     container_name: quicksay_postgres
     restart: always
     environment:
-      POSTGRES_DB: ai_voice_bot_db
-      POSTGRES_USER: bot_admin
-      POSTGRES_PASSWORD: SuperSecurePass123!  # <- ВСТАВЬ СЮДА СВОЙ ПАРОЛЬ
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "5432:5432"
+      - "${DB_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -32,9 +32,10 @@ services:
     depends_on:
       - redis
       - postgres
+    env_file:
+      - .env
     volumes:
       - .:/app
-      - ./downloads:/app/downloads
 
   # 4. Сервис Фонового Воркера (Celery)
   worker:
@@ -45,11 +46,28 @@ services:
     depends_on:
       - redis
       - postgres
+    env_file:
+      - .env
     volumes:
       - .:/app
-      - ./downloads:/app/downloads
-      - /usr/bin/ffmpeg:/usr/bin/ffmpeg
+
+# 5. Веб-панель управления базой (pgAdmin 4)
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: quicksay_pgadmin
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password}
+      PGADMIN_LISTEN_PORT: 80
+    ports:
+      - "8585:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
 
 volumes:
   postgres_data:
   redis_data:
+  pgadmin_data:

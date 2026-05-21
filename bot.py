@@ -3,157 +3,307 @@ import logging
 import asyncio
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, BotCommandScopeChat
 from psycopg2.pool import ThreadedConnectionPool
 
-# Импортируем параметры твоей базы данных напрямую
-from config import BOT_TOKEN, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
+from config import BOT_TOKEN, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, ADMIN_ID
 from tasks import process_audio_task
 
-# 1. Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# 2. Инициализация Бота, Диспетчера и папок
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Задаем жесткий абсолютный путь внутри контейнера Docker (/app/downloads)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# 3. Упаковка параметров для psycopg2 в словарь
 DB_PARAMS = {
-    "dbname": DB_NAME,
-    "user": DB_USER,
-    "password": DB_PASSWORD,
-    "host": DB_HOST,
-    "port": DB_PORT
+    "dbname": DB_NAME, "user": DB_USER, "password": DB_PASSWORD, "host": DB_HOST, "port": DB_PORT
 }
 
-# 4. Инициализация пула соединений PostgreSQL
 try:
     db_pool = ThreadedConnectionPool(minconn=1, maxconn=10, **DB_PARAMS)
-    logger.info("✅ Пул соединений PostgreSQL успешно запущен.")
+    logger.info("✅ Пул соединений PostgreSQL запущен.")
 except Exception as e:
-    logger.critical(f"❌ Не удалось запустить пул БД: {e}")
+    logger.critical(f"❌ Сбой запуска пула БД: {e}")
     raise e
 
 # ==========================================
-# ИНТЕРФЕЙС: КЛАВИАТУРЫ И ОНБОРДИНГ
+# РАСШИРЕННЫЙ СЛОВАРЬ МУЛЬТИЯЗЫЧНОЙ ЛОКАЛИЗАЦИИ
+# ==========================================
+LOCALIZATION = {
+    "en": {
+        "welcome": "👋 <b>Hello, {name}! I am your AI Assistant QuickSay.</b>\n\nI turn voice messages and video notes into text, summaries, protocols, and translations.\n\n👇 <b>Choose processing mode:</b>",
+        "settings_title": "⚙️ <b>Choose audio/video processing mode:</b>",
+        "choose_lang": "🌐 <b>Choose translation language:</b>",
+        "btn_summary": "📝 Summary", "btn_creative": "🎨 Creative",
+        "btn_meeting": "💼 Minutes", "btn_insider": "⚡ Insight", "btn_editor": "✍️ Editor",
+        "btn_opponent": "🧠 Opponent", "btn_diary": "🌱 Diary",
+        "btn_translate": "🌐 Translation", "btn_back": "⬅️ Back",
+        "menu_desc_start": "Instruction", "menu_desc_settings": "Change mode",
+        "status_changed": "🎯 <b>Done!</b> Current mode: <b>{style}</b>.",
+        "file_received": "📥 File received. Downloading to server...",
+        "processing": "⏳ Processing audio in background. Expect the result shortly!",
+        "download_error": "❌ Failed to download the file.", "db_error": "❌ Database error.",
+        "style_summary": "📝 Summary", "style_creative": "🎨 Creative",
+        "style_meeting": "💼 Meeting Minutes Protocol", "style_insider": "⚡ One-Sentence Insight", "style_editor": "✍️ Smart Text Editor",
+        "style_opponent": "🧠 Brainstorm Opponent", "style_diary": "🌱 Personal Diary",
+        "style_lang_ua": "🇺🇦 Translation to Ukrainian", "style_lang_en": "🇬🇧 Translation to English",
+        "style_lang_de": "🇩🇪 Translation to German", "style_lang_fr": "🇫🇷 Translation to French",
+        "style_lang_es": "🇪🇸 Translation to Spanish", "style_lang_it": "🇮🇹 Translation to Italian"
+    },
+    "ru": {
+        "welcome": "👋 <b>Привет, {name}! Я твой ИИ-ассистент QuickSay.</b>\n\nПревращаю аудиосообщения и кружочки в text, выжимки, протоколы и переводы.\n\n👇 <b>Выбери режим обработки:</b>",
+        "settings_title": "⚙️ <b>Выбери режим обработки аудио/видео:</b>",
+        "choose_lang": "🌐 <b>Выбери язык перевода:</b>",
+        "btn_summary": "📝 Суть", "btn_creative": "🎨 Креатив",
+        "btn_meeting": "💼 Протокол", "btn_insider": "⚡ Инсайт", "btn_editor": "✍️ Редактор",
+        "btn_opponent": "🧠 Оппонент", "btn_diary": "🌱 Дневник",
+        "btn_translate": "🌐 Перевод", "btn_back": "⬅️ Назад",
+        "menu_desc_start": "Инструкция", "menu_desc_settings": "Выбор режима",
+        "status_changed": "🎯 <b>Готово!</b> Текущий режим: <b>{style}</b>.",
+        "file_received": "📥 Файл получен. Начинаю скачивание...",
+        "processing": "⏳ Обрабатываю аудио в фоне. Скоро прилетит ответ!",
+        "download_error": "❌ Не удалось получить файл.", "db_error": "❌ Ошибка базы данных.",
+        "style_summary": "📝 Суть", "style_creative": "🎨 Креатив",
+        "style_meeting": "💼 Протокол встречи", "style_insider": "⚡ Инсайт в одну строку", "style_editor": "✍️ Умный текстовый редактор",
+        "style_opponent": "🧠 Критический оппонент", "style_diary": "🌱 Анализ личного дневника",
+        "style_lang_ua": "🇺🇦 Перевод на украинский", "style_lang_en": "🇬🇧 Перевод на английский",
+        "style_lang_de": "🇩🇪 Перевод на немецкий", "style_lang_fr": "🇫🇷 Перевод на французский",
+        "style_lang_es": "🇪🇸 Перевод на испанский", "style_lang_it": "🇮🇹 Перевод на итальянский"
+    },
+    "uk": {
+        "welcome": "👋 <b>Привіт, {name}! Я твій ІІ-асистент QuickSay.</b>\n\nПеретворюю аудіоповідомлення та кружечки на текст, вижимки, протоколи та переклади.\n\n👇 <b>Вибери режим обробки:</b>",
+        "settings_title": "⚙️ <b>Вибери режим обробки аудіо/відео:</b>",
+        "choose_lang": "🌐 <b>Вибери мову перекладу:</b>",
+        "btn_summary": "📝 Суть", "btn_creative": "🎨 Креатив",
+        "btn_meeting": "💼 Протокол", "btn_insider": "⚡ Інсайт", "btn_editor": "✍️ Редактор",
+        "btn_opponent": "🧠 Опонент", "btn_diary": "🌱 Щоденник",
+        "btn_translate": "🌐 Переклад", "btn_back": "⬅️ Назад",
+        "menu_desc_start": "Інструкція", "menu_desc_settings": "Вибір режиму",
+        "status_changed": "🎯 <b>Готово!</b> Поточний режим: <b>{style}</b>.",
+        "file_received": "📥 Файл отримано. Починаю завантаження...",
+        "processing": "⏳ Обробляю аудіо у фоні. Скоро прилетить відповідь!",
+        "download_error": "❌ Не вдалося отримати файл.", "db_error": "❌ Помилка бази даних.",
+        "style_summary": "📝 Суть", "style_creative": "🎨 Креатив",
+        "style_meeting": "💼 Протокол зустрічі", "style_insider": "⚡ Інсайт в один рядок", "style_editor": "✍️ Розумний текстовий редактор",
+        "style_opponent": "🧠 Критичний опонент", "style_diary": "🌱 Аналіз особистого щоденника",
+        "style_lang_ua": "🇺🇦 Переклад на українську", "style_lang_en": "🇬🇧 Переклад на англійську",
+        "style_lang_de": "🇩🇪 Переклад на німецьку", "style_lang_fr": "🇫🇷 Переклад на французьку",
+        "style_lang_es": "🇪🇸 Переклад на іспанську", "style_lang_it": "🇮🇹 Переклад на італійську"
+    }
+}
+
+def get_lang(lang_code):
+    if lang_code in LOCALIZATION:
+        return LOCALIZATION[lang_code]
+    return LOCALIZATION["en"]
+
+# ==========================================
+# СЕТКА КНОПОК ИНТЕРФЕЙСА
 # ==========================================
 
-def get_main_keyboard():
-    """Возвращает главное меню стилей"""
+def get_main_keyboard(current_style="summary", lang="en"):
+    lang_dict = get_lang(lang)
+    is_translation = str(current_style).startswith("lang_")
+    
+    t_summary = f"{lang_dict['btn_summary']} ✅" if current_style == "summary" else lang_dict['btn_summary']
+    t_creative = f"{lang_dict['btn_creative']} ✅" if current_style == "creative" else lang_dict['btn_creative']
+    t_meeting = f"{lang_dict['btn_meeting']} ✅" if current_style == "meeting" else lang_dict['btn_meeting']
+    t_insider = f"{lang_dict['btn_insider']} ✅" if current_style == "insider" else lang_dict['btn_insider']
+    t_editor = f"{lang_dict['btn_editor']} ✅" if current_style == "editor" else lang_dict['btn_editor']
+    t_opponent = f"{lang_dict['btn_opponent']} ✅" if current_style == "opponent" else lang_dict['btn_opponent']
+    t_diary = f"{lang_dict['btn_diary']} ✅" if current_style == "diary" else lang_dict['btn_diary']
+    t_translate = f"{lang_dict['btn_translate']} ✅" if is_translation else lang_dict['btn_translate']
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="💼 Бизнес (Суть)", callback_data="set_style:business"),
-            InlineKeyboardButton(text="📝 Конспект", callback_data="set_style:summary")
-        ],
-        [
-            InlineKeyboardButton(text="🇺🇦 Перевод на UA", callback_data="set_style:translate_ua"),
-            InlineKeyboardButton(text="🌐 Другие языки", callback_data="open_languages")
-        ],
-        [
-            InlineKeyboardButton(text="🧘 Философия", callback_data="set_style:philosophy"),
-            InlineKeyboardButton(text="🎭 Юмор", callback_data="set_style:humor")
-        ]
+        [InlineKeyboardButton(text=t_summary, callback_data="set_style:summary"),
+         InlineKeyboardButton(text=t_creative, callback_data="set_style:creative")],
+        [InlineKeyboardButton(text=t_meeting, callback_data="set_style:meeting"),
+         InlineKeyboardButton(text=t_insider, callback_data="set_style:insider"),
+         InlineKeyboardButton(text=t_editor, callback_data="set_style:editor")],
+        [InlineKeyboardButton(text=t_opponent, callback_data="set_style:opponent"),
+         InlineKeyboardButton(text=t_diary, callback_data="set_style:diary")],
+        [InlineKeyboardButton(text=t_translate, callback_data="open_languages")]
     ])
+
+def get_languages_keyboard(current_style="summary", lang="en"):
+    lang_dict = get_lang(lang)
+    text_ua = "🇺🇦 UA ✅" if current_style == "lang_ua" else "🇺🇦 UA"
+    text_en = "🇬🇧 EN ✅" if current_style == "lang_en" else "🇬🇧 EN"
+    text_de = "🇩🇪 DE ✅" if current_style == "lang_de" else "🇩🇪 DE"
+    text_fr = "🇫🇷 FR ✅" if current_style == "lang_fr" else "🇫🇷 FR"
+    text_es = "🇪🇸 ES ✅" if current_style == "lang_es" else "🇪🇸 ES"
+    text_it = "🇮🇹 IT ✅" if current_style == "lang_it" else "🇮🇹 IT"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text_ua, callback_data="set_style:lang_ua"),
+         InlineKeyboardButton(text=text_en, callback_data="set_style:lang_en"),
+         InlineKeyboardButton(text=text_de, callback_data="set_style:lang_de")],
+        [InlineKeyboardButton(text=text_fr, callback_data="set_style:lang_fr"),
+         InlineKeyboardButton(text=text_es, callback_data="set_style:lang_es"),
+         InlineKeyboardButton(text=text_it, callback_data="set_style:lang_it")],
+        [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="back_to_styles")]
+    ])
+
+# ==========================================
+# ОБРАБОТЧИКИ КОМАНД
+# ==========================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     user_id = message.chat.id
-    user_name = message.from_user.first_name or "Друг"
+    user_name = message.from_user.first_name or "Friend" if message.from_user else "Friend"
+    user_lang = message.from_user.language_code or "en" if message.from_user else "en"
+    lang_dict = get_lang(user_lang)
     
-    # Автоматическая регистрация пользователя в БД
+    # Извлекаем дополнительные данные из профиля Telegram
+    username = message.from_user.username if message.from_user else None
+    first_name = message.from_user.first_name if message.from_user else None
+    last_name = message.from_user.last_name if message.from_user else None
+    
     conn = None
     try:
         conn = db_pool.getconn()
         cur = conn.cursor()
+        
+        # Записываем новые данные или обновляем профиль существующего пользователя
         cur.execute("""
-            INSERT INTO users (telegram_id, ai_style, balance_minutes)
-            VALUES (%s, 'business', 15)
-            ON CONFLICT (telegram_id) DO NOTHING;
-        """, (user_id,))
+            INSERT INTO users (telegram_id, ai_style, balance_minutes, username, first_name, last_name)
+            VALUES (%s, 'summary', 15, %s, %s, %s) 
+            ON CONFLICT (telegram_id) DO UPDATE 
+            SET username = EXCLUDED.username, 
+                first_name = EXCLUDED.first_name, 
+                last_name = EXCLUDED.last_name;
+        """, (user_id, username, first_name, last_name))
+        
         conn.commit()
         cur.close()
     except Exception as e:
-        logger.error(f"Ошибка регистрации пользователя {user_id}: {e}")
+        logger.error(f"Ошибка регистрации {user_id}: {e}")
     finally:
         if conn:
             db_pool.putconn(conn)
 
-    welcome_text = (
-        f"👋 <b>Привет, {user_name}! Я твой умный ИИ-помощник QuickSay.</b>\n\n"
-        f"Я умею мгновенно превращать <b>голосовые сообщения, аудиофайлы и кружочки</b> "
-        f"в структурированный текст, переводы и выжимки.\n\n"
-        f"⚙️ <b>Как это работает?</b>\n"
-        f"1. Выбери желаемый стиль обработки на кнопках ниже (по умолчанию стоит <i>Бизнес</i>).\n"
-        f"2. Отправь мне любое аудио или видеосообщение.\n"
-        f"3. Через пару секунд получи готовый идеальный результат!\n\n"
-        f"👇 <b>Выбери стиль обработки прямо сейчас:</b>"
+    try:
+        commands = [
+            BotCommand(command="/start", description=lang_dict["menu_desc_start"]),
+            BotCommand(command="/settings", description=f"[{lang_dict['btn_summary']}] {lang_dict['menu_desc_settings']} ⚙️")
+        ]
+        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+    except Exception as e:
+        logger.error(f"Ошибка установки меню для {user_id}: {e}")
+
+    await message.answer(
+        lang_dict["welcome"].format(name=user_name), 
+        reply_markup=get_main_keyboard("summary", user_lang), parse_mode="HTML"
     )
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
 
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
-    """Вызов меню выбора стилей и языков в любой момент сессии"""
-    settings_text = (
-        "⚙️ <b>Настройки стилей и перевода QuickSay</b>\n\n"
-        "Выбери режим, в котором ИИ должен обрабатывать твои голосовые сообщения и кружочки:"
-    )
-    await message.answer(settings_text, reply_markup=get_main_keyboard(), parse_mode="HTML")
+    user_id = message.chat.id
+    user_lang = message.from_user.language_code or "en" if message.from_user else "en"
+    lang_dict = get_lang(user_lang)
+    current_style = "summary"
+    
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+        res = cur.fetchone()
+        cur.close()
+        if res:
+            current_style = res[0]
+    except Exception as e:
+        logger.error(f"Ошибка получения стиля: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
-# Меню выбора языков перевода
+    await message.answer(lang_dict["settings_title"], reply_markup=get_main_keyboard(current_style, user_lang), parse_mode="HTML")
+
 @dp.callback_query(F.data == "open_languages")
 async def open_languages_menu(callback: CallbackQuery):
-    lang_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🇬🇧 Английский", callback_data="set_style:lang_en"),
-            InlineKeyboardButton(text="🇩🇪 Немецкий", callback_data="set_style:lang_de")
-        ],
-        [
-            InlineKeyboardButton(text="🇵🇱 Польский", callback_data="set_style:lang_pl"),
-            InlineKeyboardButton(text="🇪🇸 Испанский", callback_data="set_style:lang_es")
-        ],
-        [
-            InlineKeyboardButton(text="🇫🇷 Французский", callback_data="set_style:lang_fr"),
-            InlineKeyboardButton(text="🇮🇹 Итальянский", callback_data="set_style:lang_it")
-        ],
-        [
-            InlineKeyboardButton(text="⬅️ Назад к стилям", callback_data="back_to_styles")
-        ]
-    ])
-    await callback.message.edit_text("🌐 <b>Выбери язык, на который перевести твоё аудио/видео:</b>", reply_markup=lang_keyboard, parse_mode="HTML")
+    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
+        await callback.answer("❌ Error: Message not accessible", show_alert=True)
+        return
+    user_id = callback.message.chat.id
+    user_lang = callback.from_user.language_code or "en"
+    lang_dict = get_lang(user_lang)
+    current_style = "summary"
+    
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+        res = cur.fetchone()
+        cur.close()
+        if res:
+            current_style = res[0]
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+    await callback.message.edit_text(lang_dict["choose_lang"], reply_markup=get_languages_keyboard(current_style, user_lang), parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "back_to_styles")
 async def back_to_styles(callback: CallbackQuery):
-    await callback.message.edit_text("👇 <b>Выбери стиль обработки прямо сейчас:</b>", reply_markup=get_main_keyboard(), parse_mode="HTML")
+    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
+        await callback.answer("❌ Error: Message not accessible", show_alert=True)
+        return
+    user_id = callback.message.chat.id
+    user_lang = callback.from_user.language_code or "en"
+    lang_dict = get_lang(user_lang)
+    current_style = "summary"
+    
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+        res = cur.fetchone()
+        cur.close()
+        if res:
+            current_style = res[0]
+    except Exception as e:
+        logger.error(f"Ошибка: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+    await callback.message.edit_text(
+        lang_dict["welcome"].format(name=callback.from_user.first_name or "Friend"), 
+        reply_markup=get_main_keyboard(current_style, user_lang), parse_mode="HTML"
+    )
     await callback.answer()
 
-# Универсальный обработчик переключения стилей и языков
 @dp.callback_query(F.data.startswith("set_style:"))
 async def process_style_callback(callback: CallbackQuery):
+    if not callback.data or not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
+        await callback.answer("❌ Error", show_alert=True)
+        return
     style_name = callback.data.split(":")[1]
     user_id = callback.message.chat.id
+    user_lang = callback.from_user.language_code or "en"
+    lang_dict = get_lang(user_lang)
     
-    style_titles = {
-        "business": "💼 Бизнес-ассистент",
-        "summary": "📝 Подробный конспект",
-        "translate_ua": "🇺🇦 Перевод на украинский",
-        "philosophy": "🧘 Философский анализ",
-        "humor": "🎭 Юмористический взгляд",
-        "lang_en": "🇬🇧 Перевод на английский",
-        "lang_de": "🇩🇪 Перевод на немецкий",
-        "lang_pl": "🇵🇱 Перевод на польский",
-        "lang_es": "🇪🇸 Перевод на испанский",
-        "fr": "🇫🇷 Перевод на французский",
-        "it": "🇮🇹 Перевод на итальянский"
+    style_titles_short = {
+        "summary": lang_dict["btn_summary"], "creative": lang_dict["btn_creative"],
+        "meeting": lang_dict["btn_meeting"], "insider": lang_dict["btn_insider"], "editor": lang_dict["btn_editor"],
+        "opponent": lang_dict["btn_opponent"], "diary": lang_dict["btn_diary"],
+        "lang_ua": "🇺🇦 UA", "lang_en": "🇬🇧 EN", "lang_de": "🇩🇪 DE",
+        "lang_fr": "🇫🇷 FR", "lang_es": "🇪🇸 ES", "lang_it": "🇮🇹 IT"
     }
     
-    selected_title = style_titles.get(style_name, "💼 Бизнес-ассистент")
+    selected_short = style_titles_short.get(style_name, lang_dict["btn_summary"])
+    selected_full = lang_dict.get(f"style_{style_name}", lang_dict["style_summary"])
     
     conn = None
     try:
@@ -163,15 +313,81 @@ async def process_style_callback(callback: CallbackQuery):
         conn.commit()
         cur.close()
         
-        await callback.answer(f"Выбран стиль: {selected_title}")
-        # Исправлено: parse_mode изменен на верхний регистр "HTML", чтобы aiogram не игнорировал теги
-        await callback.message.answer(f"🎯 <b>Готово!</b> Теперь все файлы я обрабатываю в стиле: <b>{selected_title}</b>.", parse_mode="HTML")
+        # Индивидуальное переименование кнопки Menu на языке юзера
+        commands = [
+            BotCommand(command="/start", description=lang_dict["menu_desc_start"]),
+            BotCommand(command="/settings", description=f"[{selected_short}] {lang_dict['menu_desc_settings']} ⚙️")
+        ]
+        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+        
+        await callback.answer(f"{selected_short}")
+        await callback.message.answer(lang_dict["status_changed"].format(style=selected_full), parse_mode="HTML")
+        
+        # Меняем галочки
+        if style_name.startswith("lang_"):
+            await callback.message.edit_reply_markup(reply_markup=get_languages_keyboard(style_name, user_lang))
+        else:
+            await callback.message.edit_reply_markup(reply_markup=get_main_keyboard(style_name, user_lang))
+            
     except Exception as e:
-        logger.error(f"Ошибка смены стиля для {user_id}: {e}")
-        await callback.answer("❌ Ошибка при смене стиля.")
+        logger.error(f"Ошибка смены стиля: {e}")
+        await callback.answer(lang_dict["db_error"])
     finally:
         if conn:
             db_pool.putconn(conn)
+
+# ==========================================
+# ПАНЕЛЬ АДМИНИСТРАТОРА
+# ==========================================
+
+@dp.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message):
+    if not message.from_user or message.from_user.id != ADMIN_ID: return
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM users;")
+        total_users = cur.fetchone()[0]
+        cur.execute("SELECT SUM(balance_minutes) FROM users;")
+        total_minutes = cur.fetchone()[0] or 0
+        cur.close()
+        
+        await message.answer(f"📊 <b>Статистика QuickSay Bot</b>\n\n👥 Всего в БД: <code>{total_users}</code>\n⏳ Общий баланс: <code>{total_minutes} мин.</code>", parse_mode="HTML")
+    except Exception as e:
+        await message.answer("❌ Ошибка статистики.")
+    finally:
+        if conn: db_pool.putconn(conn)
+
+@dp.message(Command("add_minutes"))
+async def cmd_add_minutes(message: Message):
+    if not message.from_user or message.from_user.id != ADMIN_ID: return
+    if not message.text: return
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("⚠️ Формат: <code>/add_minutes [ID] [Минуны]</code>")
+        return
+    target_user_id = args[1]
+    try: minutes_to_add = int(args[2])
+    except: return
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s;", (target_user_id,))
+        if not cur.fetchone():
+            await message.answer("❌ Нет юзера в БД.")
+            return
+        cur.execute("UPDATE users SET balance_minutes = balance_minutes + %s WHERE telegram_id = %s;", (minutes_to_add, target_user_id))
+        conn.commit()
+        cur.close()
+        await message.answer(f"✅ Пользователю <code>{target_user_id}</code> начислено: <b>+{minutes_to_add} мин.</b>")
+        try: await bot.send_message(chat_id=target_user_id, text=f"🎁 <b>Вам начислены бонусные минуты!</b>\nБаланс увеличен на: <b>+{minutes_to_add} мин.</b>", parse_mode="HTML")
+        except: pass
+    except Exception as e:
+        await message.answer("❌ Ошибка SQL.")
+    finally:
+        if conn: db_pool.putconn(conn)
 
 # ==========================================
 # ОБРАБОТКА МЕДИАФАЙЛОВ
@@ -180,77 +396,60 @@ async def process_style_callback(callback: CallbackQuery):
 @dp.message(F.voice | F.audio | F.video | F.video_note)
 async def handle_media(message: Message):
     user_id = message.chat.id
-    conn = None
-    user_style = "business"
+    if not message.from_user:
+        return
     
-    # Извлекаем текущий стиль из БД
+    user_lang = message.from_user.language_code or "en"
+    lang_dict = get_lang(user_lang)
+    conn = None
+    user_style = "summary"
+    
     try:
         conn = db_pool.getconn()
         cur = conn.cursor()
         cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
         res = cur.fetchone()
         cur.close()
-        if res:
-            user_style = res[0]
+        if res: user_style = res[0]
     except Exception as e:
-        logger.error(f"Ошибка получения профиля для {user_id}: {e}")
+        logger.error(f"Ошибка получения профиля: {e}")
     finally:
-        if conn:
-            db_pool.putconn(conn)
+        if conn: db_pool.putconn(conn)
             
-    # Определяем тип файла и расширение
-    if message.voice:
-        file_id = message.voice.file_id
-        file_ext = "ogg"
-    elif message.audio:
-        file_id = message.audio.file_id
-        file_ext = "mp3"
-    elif message.video:
-        file_id = message.video.file_id
-        file_ext = "mp4"
-    elif message.video_note:
-        file_id = message.video_note.file_id
-        file_ext = "mp4"
-    else:
-        return
+    if message.voice: file_id, file_ext = message.voice.file_id, "ogg"
+    elif message.audio: file_id, file_ext = message.audio.file_id, "mp3"
+    elif message.video: file_id, file_ext = message.video.file_id, "mp4"
+    elif message.video_note: file_id, file_ext = message.video_note.file_id, "mp4"
+    else: return
 
-    await message.answer("📥 Файл получен. Начинаю скачивание на сервер...")
-
-    # Скачиваем файл на сервер во временную папку
+    await message.answer(lang_dict["file_received"])
     try:
         file_info = await bot.get_file(file_id)
+        if not file_info.file_path:
+            return await message.answer(lang_dict["download_error"])
         file_path_on_server = os.path.join(DOWNLOAD_DIR, f"{file_id}.{file_ext}")
         await bot.download_file(file_info.file_path, file_path_on_server)
     except Exception as e:
-        logger.error(f"Ошибка скачивания файла от {user_id}: {e}")
-        return await message.answer("❌ Не удалось получить файл из Telegram. Попробуйте еще раз.")
+        return await message.answer(lang_dict["download_error"])
 
-    # Передаём задачу в фоновую очередь Celery
     process_audio_task.delay(file_path_on_server, user_id, user_style)
-    await message.answer("⏳ Задача добавлена в очередь обработки. Скоро прилетит ответ!")
+    await message.answer(lang_dict["processing"])
 
 async def set_main_menu(bot_instance: Bot):
-    """Добавляет официальную кнопку меню в интерфейс Telegram"""
     commands = [
-        BotCommand(command="/start", description="⚙️ Инструкции"),
-        BotCommand(command="/settings", description="⚙️ Выбор режима")
+        BotCommand(command="/start", description="Instruction / Инструкция"),
+        BotCommand(command="/settings", description="Change mode / Настройки")
     ]
     await bot_instance.set_my_commands(commands)
 
 async def main():
-    logger.info("🚀 Запуск основного процесса бота QuickSay...")
-    
-    # Автоматически регистрируем кнопку меню в интерфейсе Telegram
+    logger.info("🚀 Запуск супер-комбайна QuickSay...")
     await set_main_menu(bot)
-    
-    # Очищаем старые зависшие обновления в Telegram, чтобы бот не спамил старыми ответами
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Запускаем поллинг, передавая бота внутрь диспетчера
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Бот успешно остановлен.")
+        logger.info("🛑 Бот остановлен.")

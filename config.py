@@ -11,6 +11,9 @@ load_dotenv()
 # Telegram Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
+# Crypto Bot Token (Добавляем сюда)
+CRYPTO_BOT_TOKEN = os.getenv("CRYPTO_BOT_TOKEN", "")
+
 # API Keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
@@ -47,6 +50,8 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не установлен в .env файле")
+if not CRYPTO_BOT_TOKEN:
+    raise ValueError("❌ CRYPTO_BOT_TOKEN не установлен в .env файле")
 if not GROQ_API_KEY:
     raise ValueError("❌ GROQ_API_KEY не установлен в .env файле")
 if not DB_PASSWORD:

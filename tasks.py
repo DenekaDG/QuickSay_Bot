@@ -12,7 +12,7 @@ from config import BOT_TOKEN, GROQ_API_KEY, DB_NAME, DB_USER, DB_PASSWORD, DB_HO
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API_URL = "https://api.telegram.org/bot"
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 GROQ_AUDIO_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -35,7 +35,8 @@ celery_app.conf.update(
     task_time_limit=300
 )
 
-def get_audio_duration(file_path):
+# Выносим блокирующий ffprobe в отдельный поток
+def _sync_get_audio_duration(file_path):
     try:
         logger.info(f"📏 Замеряю длительность файла: {file_path}")
         result = subprocess.run(
@@ -49,7 +50,11 @@ def get_audio_duration(file_path):
         logger.error(f"⚠️ Ошибка ffprobe: {e}")
     return 0
 
-def update_user_balance(chat_id, minutes_spent):
+async def get_audio_duration(file_path):
+    return await asyncio.to_thread(_sync_get_audio_duration, file_path)
+
+# Выносим синхронную работу с psycopg2 в отдельный поток
+def _sync_update_user_balance(chat_id, minutes_spent):
     try:
         conn = psycopg2.connect(**DB_PARAMS)
         cur = conn.cursor()
@@ -66,7 +71,11 @@ def update_user_balance(chat_id, minutes_spent):
         logger.error(f"❌ Ошибка обновления баланса в БД: {e}")
         return False
 
-def extract_audio_from_video(video_path):
+async def update_user_balance(chat_id, minutes_spent):
+    return await asyncio.to_thread(_sync_update_user_balance, chat_id, minutes_spent)
+
+# Выносим тяжелый ffmpeg в отдельный поток
+def _sync_extract_audio_from_video(video_path):
     audio_path = video_path.rsplit('.', 1)[0] + ".mp3"
     try:
         logger.info(f"🎬 Конвертирую видео через ffmpeg: {video_path}")
@@ -79,6 +88,9 @@ def extract_audio_from_video(video_path):
     except Exception as e:
         logger.error(f"❌ Сбой ffmpeg: {e}")
         return None
+
+async def extract_audio_from_video(video_path):
+    return await asyncio.to_thread(_sync_extract_audio_from_video, video_path)
 
 def split_long_message(text, max_length=4000):
     if len(text) <= max_length:
@@ -96,39 +108,46 @@ def split_long_message(text, max_length=4000):
         parts.append(current_part)
     return parts
 
-async def send_telegram_message(chat_id, text):
-    url = f"{TELEGRAM_API_URL}{BOT_TOKEN}/sendMessage"
+# Принимает готовую сессию
+async def send_telegram_message(session: aiohttp.ClientSession, chat_id, text):
+    url = f"{TELEGRAM_API_URL}/sendMessage"
     messages = split_long_message(text)
-    async with aiohttp.ClientSession() as session:
-        for msg in messages:
-            payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
-            try:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        logger.error(f"❌ Ошибка отправки Telegram: {resp.status}")
-            except Exception as e:
-                logger.error(f"❌ Сбой сети Telegram API: {e}")
-            await asyncio.sleep(0.5)
+    for msg in messages:
+        payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
+        try:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    logger.error(f"❌ Ошибка отправки Telegram: {resp.status}")
+        except Exception as e:
+            logger.error(f"❌ Сбой сети Telegram API: {e}")
+        await asyncio.sleep(0.3)
 
-async def transcribe_audio(file_path):
+# Принимает готовую сессию
+async def transcribe_audio(session: aiohttp.ClientSession, file_path):
     try:
         logger.info(f"🎙️ Отправка в Groq Whisper: {file_path}")
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-        async with aiohttp.ClientSession() as session:
-            with open(file_path, "rb") as audio_file:
-                data = aiohttp.FormData()
-                data.add_field('file', audio_file, filename=os.path.basename(file_path))
-                data.add_field('model', 'whisper-large-v3-turbo')
-                async with session.post(GROQ_AUDIO_URL, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        return result.get("text", "").strip()
-                    return None
+        
+        # Открытие файла оставляем внутри контекста формы
+        with open(file_path, "rb") as audio_file:
+            data = aiohttp.FormData()
+            data.add_field('file', audio_file, filename=os.path.basename(file_path))
+            data.add_field('model', 'whisper-large-v3-turbo')
+            
+            async with session.post(GROQ_AUDIO_URL, headers=headers, data=data, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    return result.get("text", "").strip()
+                else:
+                    body = await resp.text()
+                    logger.error(f"❌ Ошибка Groq Whisper (Статус {resp.status}): {body}")
+                return None
     except Exception as e:
         logger.error(f"❌ Ошибка Groq Whisper: {e}")
         return None
 
-async def analyze_with_llama(text, user_style="summary"):
+# Принимает готовую сессию
+async def analyze_with_llama(session: aiohttp.ClientSession, text, user_style="summary"):
     try:
         logger.info(f"🧠 Анализ Llama. Режим: {user_style}")
         
@@ -137,7 +156,6 @@ async def analyze_with_llama(text, user_style="summary"):
             "fr": "ФРАНЦУЗСКИЙ", "es": "ИСПАНСКИЙ", "it": "ИТАЛЬЯНСКИЙ"
         }
 
-        # Настройка температуры под задачи
         if user_style in ["creative", "opponent", "diary"]:
             temperature = 0.7
         elif user_style == "insider":
@@ -145,7 +163,6 @@ async def analyze_with_llama(text, user_style="summary"):
         else:
             temperature = 0.2
 
-        # 1. Логика перевода на 6 языков
         if str(user_style).startswith("lang_"):
             lang_code = user_style.split("_")[1]
             target_language = local_lang_map.get(lang_code, "АНГЛИЙСКИЙ")
@@ -160,7 +177,6 @@ async def analyze_with_llama(text, user_style="summary"):
 Текст:
 {text}"""
 
-        # 2. Новые и старые контентные режимы
         elif user_style == "creative":
             prompt = f"""Ты — харизматичный рассказчик. Перескажи этот текст живым, интересным, творческим языком, добавь немного здоровой иронии и красивых метафор. Отвечай на русском языке.\n\n<b>🎨 Креативный пересказ:</b>\n""" + f"{text}"
 
@@ -200,7 +216,7 @@ async def analyze_with_llama(text, user_style="summary"):
 Текст:
 {text}"""
 
-        else: # Дефолтная Суть (summary)
+        else:
             prompt = f"""Ты — профессиональный ассистент. Сделай краткую, жесткую выжимку текста. Выдели только ключевую суть и конкретные задачи/действия (Action Items), если они есть. Отвечай на русском языке.
 <b>📌 Главная суть:</b>
 (Краткое описание сути текста в 2-3 предложениях)
@@ -217,61 +233,72 @@ async def analyze_with_llama(text, user_style="summary"):
             "model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature, "max_tokens": 2000
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    return result["choices"][0]["message"]["content"]
-                return None
+        async with session.post(GROQ_CHAT_URL, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                return result["choices"][0]["message"]["content"]
+            return None
     except Exception as e:
         logger.error(f"❌ Ошибка Llama: {e}")
         return None
 
+# Оберточная асинхронная функция, которую запускает Celery
+async def async_process_audio(file_path, chat_id, user_style):
+    extracted_audio = None
+    # Создаем одну глобальную сессию на всю цепочку запросов таски
+    async with aiohttp.ClientSession() as session:
+        try:
+            if not os.path.exists(file_path):
+                logger.error(f"❌ Файл отсутствует: {file_path}")
+                return
+            
+            seconds_duration = await get_audio_duration(file_path)
+            minutes_spent = max(1, math.ceil(seconds_duration / 60))
+            
+            if file_path.lower().endswith(".mp4"):
+                extracted_audio = await extract_audio_from_video(file_path)
+                if extracted_audio:
+                    target_processing_file = extracted_audio
+                else:
+                    await send_telegram_message(session, chat_id, "❌ Ошибка извлечения звука из видео.")
+                    return
+            else:
+                target_processing_file = file_path
+            
+            text_result = await transcribe_audio(session, target_processing_file)
+            if not text_result or len(text_result.strip()) == 0:
+                await send_telegram_message(session, chat_id, "❌ Не удалось распознать речь. В файле тишина.")
+                return
+            
+            ai_summary = await analyze_with_llama(session, text_result, user_style)
+            if not ai_summary or len(ai_summary.strip()) == 0:
+                await send_telegram_message(session, chat_id, "❌ Нейросеть вернула пустой ответ.")
+                return
+            
+            final_text = f"<b>📜 Оригинальный текст:</b>\n<i>{text_result}</i>\n\n{ai_summary}"
+            await send_telegram_message(session, chat_id, final_text)
+            await update_user_balance(chat_id, minutes_spent)
+            
+        except Exception as e:
+            # Пробрасываем ошибку наверх, чтобы сработал ретрай Celery
+            raise e
+        finally:
+            for path in [file_path, extracted_audio]:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                        logger.info(f"🗑️ Удален временный файл: {path}")
+                    except Exception as err:
+                        logger.error(f"⚠️ Ошибка удаления {path}: {err}")
+
+# Сама таска Celery остается синхронной точкой входа, но просто запускает асинхронный пайплайн
 @celery_app.task(name="tasks.process_audio_task", bind=True, max_retries=3)
 def process_audio_task(self, file_path, chat_id, user_style="summary"):
     logger.info(f"🚀 Задача Celery запущена для файла: {file_path}")
-    extracted_audio = None
     try:
-        if not os.path.exists(file_path):
-            logger.error(f"❌ Файл отсутствует: {file_path}")
-            return
-        
-        seconds_duration = get_audio_duration(file_path)
-        minutes_spent = max(1, math.ceil(seconds_duration / 60))
-        
-        if file_path.lower().endswith(".mp4"):
-            extracted_audio = extract_audio_from_video(file_path)
-            if extracted_audio:
-                target_processing_file = extracted_audio
-            else:
-                asyncio.run(send_telegram_message(chat_id, "❌ Ошибка извлечения звука из видео."))
-                return
-        else:
-            target_processing_file = file_path
-        
-        text_result = asyncio.run(transcribe_audio(target_processing_file))
-        if not text_result or len(text_result.strip()) == 0:
-            asyncio.run(send_telegram_message(chat_id, "❌ Не удалось распознать речь. В файле тишина."))
-            return
-        
-        ai_summary = asyncio.run(analyze_with_llama(text_result, user_style))
-        if not ai_summary or len(ai_summary.strip()) == 0:
-            asyncio.run(send_telegram_message(chat_id, "❌ Нейросеть вернула пустой ответ."))
-            return
-        
-        final_text = f"<b>📜 Оригинальный текст:</b>\n<i>{text_result}</i>\n\n{ai_summary}"
-        asyncio.run(send_telegram_message(chat_id, final_text))
-        update_user_balance(chat_id, minutes_spent)
-        
+        # Корректный однократный запуск асинхронного цикла для выполнения всей задачи
+        asyncio.run(async_process_audio(file_path, chat_id, user_style))
     except Exception as e:
         logger.error(f"❌ Сбой воркера: {e}")
         if self.request.retries < self.max_retries:
             raise self.retry(exc=e, countdown=5)
-    finally:
-        for path in [file_path, extracted_audio]:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                    logger.info(f"🗑️ Удален временный файл: {path}")
-                except Exception as err:
-                    logger.error(f"⚠️ Ошибка удаления {path}: {err}")

@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # 1. Сервис Брокера сообщений (Redis)
   redis:
@@ -51,7 +53,7 @@ services:
     volumes:
       - .:/app
 
-# 5. Веб-панель управления базой (pgAdmin 4)
+  # 5. Веб-панель управления базой (pgAdmin 4)
   pgadmin:
     image: dpage/pgadmin4
     container_name: quicksay_pgadmin
@@ -67,6 +69,23 @@ services:
     depends_on:
       - postgres
 
+  # 6. Сервис Вебхук-сервера CryptoBot (aiohttp)
+  webhook_server:
+    build: .
+    container_name: quicksay_webhook
+    restart: always
+    working_dir: /app
+    command: python3 webhook_server.py
+    ports:
+      - "8081:8081"
+    depends_on:
+      - postgres
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+# Глобальные волюмы для сохранения данных при перезапусках
 volumes:
   postgres_data:
   redis_data:

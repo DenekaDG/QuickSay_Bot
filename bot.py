@@ -1,17 +1,21 @@
 import os
-import logging
 import asyncio
+from typing import Optional, Dict, Tuple
+from pathlib import Path
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, BotCommandScopeChat
 from psycopg2.pool import ThreadedConnectionPool
+from psycopg2 import Error as PostgresError
 
 from config import BOT_TOKEN, DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, ADMIN_ID
 from tasks import process_audio_task
 from payment_service import generate_payment_link
+from logging_config import get_bot_logger
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+# Initialize logger with file rotation
+logger = get_bot_logger()
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -117,542 +121,979 @@ LOCALIZATION = {
     }
 }
 
-def get_lang(lang_code):
-    if lang_code in LOCALIZATION:
+def get_lang(lang_code: Optional[str]) -> Dict[str, str]:
+    """
+    Get localization dictionary for given language code.
+    
+    Args:
+        lang_code: Language code (en, ru, uk)
+        
+    Returns:
+        Dictionary with localized strings
+    """
+    if lang_code and lang_code in LOCALIZATION:
         return LOCALIZATION[lang_code]
     return LOCALIZATION["en"]
 
-# ==========================================
-# СЕТКА КНОПОК ИНТЕРФЕЙСА
-# ==========================================
-
-def get_main_keyboard(current_style="summary", lang="en"):
-    lang_dict = get_lang(lang)
-    is_translation = str(current_style).startswith("lang_")
+def get_main_keyboard(current_style: str = "summary", lang: str = "en") -> InlineKeyboardMarkup:
+    """
+    Create main menu keyboard with processing modes.
     
-    t_summary = f"{lang_dict['btn_summary']} ✅" if current_style == "summary" else lang_dict['btn_summary']
-    t_creative = f"{lang_dict['btn_creative']} ✅" if current_style == "creative" else lang_dict['btn_creative']
-    t_meeting = f"{lang_dict['btn_meeting']} ✅" if current_style == "meeting" else lang_dict['btn_meeting']
-    t_insider = f"{lang_dict['btn_insider']} ✅" if current_style == "insider" else lang_dict['btn_insider']
-    t_editor = f"{lang_dict['btn_editor']} ✅" if current_style == "editor" else lang_dict['btn_editor']
-    t_opponent = f"{lang_dict['btn_opponent']} ✅" if current_style == "opponent" else lang_dict['btn_opponent']
-    t_diary = f"{lang_dict['btn_diary']} ✅" if current_style == "diary" else lang_dict['btn_diary']
-    t_translate = f"{lang_dict['btn_translate']} ✅" if is_translation else lang_dict['btn_translate']
+    Args:
+        current_style: Currently selected processing style
+        lang: Language code for localization
+        
+    Returns:
+        InlineKeyboardMarkup with mode selection buttons
+    """
+    try:
+        lang_dict = get_lang(lang)
+        is_translation = str(current_style).startswith("lang_")
+        
+        t_summary = f"{lang_dict['btn_summary']} ✅" if current_style == "summary" else lang_dict['btn_summary']
+        t_creative = f"{lang_dict['btn_creative']} ✅" if current_style == "creative" else lang_dict['btn_creative']
+        t_meeting = f"{lang_dict['btn_meeting']} ✅" if current_style == "meeting" else lang_dict['btn_meeting']
+        t_insider = f"{lang_dict['btn_insider']} ✅" if current_style == "insider" else lang_dict['btn_insider']
+        t_editor = f"{lang_dict['btn_editor']} ✅" if current_style == "editor" else lang_dict['btn_editor']
+        t_opponent = f"{lang_dict['btn_opponent']} ✅" if current_style == "opponent" else lang_dict['btn_opponent']
+        t_diary = f"{lang_dict['btn_diary']} ✅" if current_style == "diary" else lang_dict['btn_diary']
+        t_translate = f"{lang_dict['btn_translate']} ✅" if is_translation else lang_dict['btn_translate']
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t_summary, callback_data="set_style:summary"),
-         InlineKeyboardButton(text=t_creative, callback_data="set_style:creative")],
-        [InlineKeyboardButton(text=t_meeting, callback_data="set_style:meeting"),
-         InlineKeyboardButton(text=t_insider, callback_data="set_style:insider"),
-         InlineKeyboardButton(text=t_editor, callback_data="set_style:editor")],
-        [InlineKeyboardButton(text=t_opponent, callback_data="set_style:opponent"),
-         InlineKeyboardButton(text=t_diary, callback_data="set_style:diary")],
-        [InlineKeyboardButton(text=t_translate, callback_data="open_languages")],
-        [InlineKeyboardButton(text=lang_dict["btn_buy_minutes"], callback_data="open_billing")]
-    ])
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t_summary, callback_data="set_style:summary"),
+             InlineKeyboardButton(text=t_creative, callback_data="set_style:creative")],
+            [InlineKeyboardButton(text=t_meeting, callback_data="set_style:meeting"),
+             InlineKeyboardButton(text=t_insider, callback_data="set_style:insider"),
+             InlineKeyboardButton(text=t_editor, callback_data="set_style:editor")],
+            [InlineKeyboardButton(text=t_opponent, callback_data="set_style:opponent"),
+             InlineKeyboardButton(text=t_diary, callback_data="set_style:diary")],
+            [InlineKeyboardButton(text=t_translate, callback_data="open_languages")],
+            [InlineKeyboardButton(text=lang_dict["btn_buy_minutes"], callback_data="open_billing")]
+        ])
+    except Exception as e:
+        logger.error(f"Error creating main keyboard: {e}")
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="back_to_styles")]])
 
-def get_languages_keyboard(current_style="summary", lang="en"):
-    lang_dict = get_lang(lang)
-    text_ua = "🇺🇦 UA ✅" if current_style == "lang_ua" else "🇺🇦 UA"
-    text_en = "🇬🇧 EN ✅" if current_style == "lang_en" else "🇬🇧 EN"
-    text_de = "🇩🇪 DE ✅" if current_style == "lang_de" else "🇩🇪 DE"
-    text_fr = "🇫🇷 FR ✅" if current_style == "lang_fr" else "🇫🇷 FR"
-    text_es = "🇪🇸 ES ✅" if current_style == "lang_es" else "🇪🇸 ES"
-    text_it = "🇮🇹 IT ✅" if current_style == "lang_it" else "🇮🇹 IT"
+def get_languages_keyboard(current_style: str = "summary", lang: str = "en") -> InlineKeyboardMarkup:
+    """
+    Create languages selection keyboard.
+    
+    Args:
+        current_style: Currently selected language style
+        lang: Interface language code
+        
+    Returns:
+        InlineKeyboardMarkup with language selection buttons
+    """
+    try:
+        lang_dict = get_lang(lang)
+        text_ua = "🇺🇦 UA ✅" if current_style == "lang_ua" else "🇺🇦 UA"
+        text_en = "🇬🇧 EN ✅" if current_style == "lang_en" else "🇬🇧 EN"
+        text_de = "🇩🇪 DE ✅" if current_style == "lang_de" else "🇩🇪 DE"
+        text_fr = "🇫🇷 FR ✅" if current_style == "lang_fr" else "🇫🇷 FR"
+        text_es = "🇪🇸 ES ✅" if current_style == "lang_es" else "🇪🇸 ES"
+        text_it = "🇮🇹 IT ✅" if current_style == "lang_it" else "🇮🇹 IT"
 
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=text_ua, callback_data="set_style:lang_ua"),
-         InlineKeyboardButton(text=text_en, callback_data="set_style:lang_en"),
-         InlineKeyboardButton(text=text_de, callback_data="set_style:lang_de")],
-        [InlineKeyboardButton(text=text_fr, callback_data="set_style:lang_fr"),
-         InlineKeyboardButton(text=text_es, callback_data="set_style:lang_es"),
-         InlineKeyboardButton(text=text_it, callback_data="set_style:lang_it")],
-        [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="back_to_styles")]
-    ])
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=text_ua, callback_data="set_style:lang_ua"),
+             InlineKeyboardButton(text=text_en, callback_data="set_style:lang_en"),
+             InlineKeyboardButton(text=text_de, callback_data="set_style:lang_de")],
+            [InlineKeyboardButton(text=text_fr, callback_data="set_style:lang_fr"),
+             InlineKeyboardButton(text=text_es, callback_data="set_style:lang_es"),
+             InlineKeyboardButton(text=text_it, callback_data="set_style:lang_it")],
+            [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="back_to_styles")]
+        ])
+    except Exception as e:
+        logger.error(f"Error creating languages keyboard: {e}")
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="back_to_styles")]])
 
-def get_billing_keyboard(lang="en"):
-    lang_dict = get_lang(lang)
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=lang_dict["btn_pack_100"], callback_data="buy_pack:100")],
-        [InlineKeyboardButton(text=lang_dict["btn_pack_300"], callback_data="buy_pack:300")],
-        [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="back_to_styles")]
-    ])
+def get_billing_keyboard(lang: str = "en") -> InlineKeyboardMarkup:
+    """
+    Create billing menu keyboard.
+    
+    Args:
+        lang: Language code for localization
+        
+    Returns:
+        InlineKeyboardMarkup with payment package buttons
+    """
+    try:
+        lang_dict = get_lang(lang)
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=lang_dict["btn_pack_100"], callback_data="buy_pack:100")],
+            [InlineKeyboardButton(text=lang_dict["btn_pack_300"], callback_data="buy_pack:300")],
+            [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="back_to_styles")]
+        ])
+    except Exception as e:
+        logger.error(f"Error creating billing keyboard: {e}")
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="back_to_styles")]])
 
 # ==========================================
-# ОБРАБОТЧИКИ КОМАНД
+# COMMAND HANDLERS
 # ==========================================
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
-    user_id = message.chat.id
-    user_name = message.from_user.first_name or "Friend" if message.from_user else "Friend"
-    user_lang = message.from_user.language_code or "en" if message.from_user else "en"
-    lang_dict = get_lang(user_lang)
+async def cmd_start(message: Message) -> None:
+    """
+    Start command handler - registers user and shows main menu.
     
-    username = message.from_user.username if message.from_user else None
-    first_name = message.from_user.first_name if message.from_user else None
-    last_name = message.from_user.last_name if message.from_user else None
-    
-    conn = None
+    Args:
+        message: Incoming message from user
+    """
     try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO users (telegram_id, ai_style, balance_minutes, username, first_name, last_name)
-            VALUES (%s, 'summary', 15, %s, %s, %s) 
-            ON CONFLICT (telegram_id) DO UPDATE 
-            SET username = EXCLUDED.username, 
-                first_name = EXCLUDED.first_name, 
-                last_name = EXCLUDED.last_name;
-        """, (user_id, username, first_name, last_name))
-        conn.commit()
-        cur.close()
-    except Exception as e:
-        logger.error(f"Ошибка регистрации {user_id}: {e}")
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
-
-    try:
-        commands = [
-            BotCommand(command="/start", description=lang_dict["menu_desc_start"]),
-            BotCommand(command="/balance", description=lang_dict["menu_desc_balance"]),
-            BotCommand(command="/settings", description=f"[{lang_dict['btn_summary']}] {lang_dict['menu_desc_settings']} ⚙️")
-        ]
-        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
-    except Exception as e:
-        logger.error(f"Ошибка установки меню для {user_id}: {e}")
-
-    await message.answer(
-        lang_dict["welcome"].format(name=user_name), 
-        reply_markup=get_main_keyboard("summary", user_lang), parse_mode="HTML"
-    )
-
-@dp.message(Command("settings"))
-async def cmd_settings(message: Message):
-    user_id = message.chat.id
-    user_lang = message.from_user.language_code or "en" if message.from_user else "en"
-    lang_dict = get_lang(user_lang)
-    current_style = "summary"
-    
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res:
-            current_style = res[0]
-    except Exception as e:
-        logger.error(f"Ошибка получения стиля: {e}")
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
-
-    await message.answer(lang_dict["settings_title"], reply_markup=get_main_keyboard(current_style, user_lang), parse_mode="HTML")
-
-@dp.message(Command("balance"))
-async def cmd_balance(message: Message):
-    user_id = message.chat.id
-    user_lang = message.from_user.language_code or "en" if message.from_user else "en"
-    lang_dict = get_lang(user_lang)
-    balance_minutes = 0
-    
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res:
-            balance_minutes = res[0]
-    except Exception as e:
-        logger.error(f"Ошибка получения баланса: {e}")
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
+        # Safety checks
+        if not message.from_user:
+            logger.warning("Received /start from anonymous user")
+            return
+        
+        user_id: int = message.chat.id
+        user_name: str = message.from_user.first_name or "Friend"
+        user_lang: str = message.from_user.language_code or "en"
+        
+        username: Optional[str] = message.from_user.username
+        first_name: Optional[str] = message.from_user.first_name
+        last_name: Optional[str] = message.from_user.last_name
+        
+        lang_dict = get_lang(user_lang)
+        
+        # Register user in database
+        conn = None
+        try:
+            if db_pool is None:
+                logger.error(f"Database pool not initialized for user {user_id}")
+                return
             
-    await message.answer(
-        lang_dict["balance_msg"].format(minutes=balance_minutes),
-        reply_markup=get_billing_keyboard(user_lang),
-        parse_mode="HTML"
-    )
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO users (telegram_id, ai_style, balance_minutes, username, first_name, last_name)
+                VALUES (%s, 'summary', 15, %s, %s, %s) 
+                ON CONFLICT (telegram_id) DO UPDATE 
+                SET username = EXCLUDED.username, 
+                    first_name = EXCLUDED.first_name, 
+                    last_name = EXCLUDED.last_name;
+            """, (user_id, username, first_name, last_name))
+            conn.commit()
+            cur.close()
+            logger.info(f"User {user_id} ({username}) registered/updated successfully")
+        except PostgresError as e:
+            logger.error(f"Database error registering user {user_id}: {e}")
+            if conn:
+                conn.rollback()
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
 
-# ==========================================
-# ОБРАБОТКА CALLBACK-ЗАПРОСОВ
-# ==========================================
+        # Set bot commands
+        try:
+            commands = [
+                BotCommand(command="/start", description=lang_dict.get("menu_desc_start", "Start")),
+                BotCommand(command="/balance", description=lang_dict.get("menu_desc_balance", "Balance")),
+                BotCommand(command="/settings", description=f"[{lang_dict.get('btn_summary', 'Mode')}] {lang_dict.get('menu_desc_settings', 'Settings')} ⚙️")
+            ]
+            await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+        except Exception as e:
+            logger.warning(f"Failed to set commands for user {user_id}: {e}")
 
-@dp.callback_query(F.data == "open_billing")
-async def open_billing_menu(callback: CallbackQuery):
-    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
-        return
-    user_id = callback.message.chat.id
-    user_lang = callback.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    balance_minutes = 0
-    
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res: 
-            balance_minutes = res[0]
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-    finally:
-        if conn and db_pool: 
-            db_pool.putconn(conn)
-
-    await callback.message.edit_text(
-        lang_dict["balance_msg"].format(minutes=balance_minutes),
-        reply_markup=get_billing_keyboard(user_lang),
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("buy_pack:"))
-async def process_buy_package(callback: CallbackQuery):
-    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
-        return
-    user_id = callback.message.chat.id
-    user_lang = callback.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    
-    try:
-        minutes_pack = int((callback.data or "").split(":")[1])
-    except (IndexError, ValueError):
-        await callback.answer("❌ Ошибка данных", show_alert=True)
-        return
-    
-    await callback.answer("⏳ ...")
-    
-    try:
-        pay_url = await generate_payment_link(user_id=user_id, minutes_package=minutes_pack)
-        
-        pay_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=lang_dict["btn_pay_now"], url=pay_url)],
-            [InlineKeyboardButton(text=lang_dict["btn_back"], callback_data="open_billing")]
-        ])
-        
-        await callback.message.edit_text(
-            lang_dict["invoice_created"],
-            reply_markup=pay_kb,
+        # Send welcome message
+        await message.answer(
+            lang_dict.get("welcome", "Welcome!").format(name=user_name), 
+            reply_markup=get_main_keyboard("summary", user_lang), 
             parse_mode="HTML"
         )
+        logger.info(f"Sent welcome message to user {user_id}")
+        
     except Exception as e:
-        logger.error(f"Ошибка создания инвойса для {user_id}: {e}")
-        await callback.message.answer(lang_dict["db_error"])
+        logger.error(f"Error in /start command: {e}", exc_info=True)
+        try:
+            await message.answer("❌ An error occurred. Please try again later.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
 
-@dp.callback_query(F.data == "open_languages")
-async def open_languages_menu(callback: CallbackQuery):
-    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
-        await callback.answer("❌ Error", show_alert=True)
-        return
-    user_id = callback.message.chat.id
-    user_lang = callback.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    current_style = "summary"
+@dp.message(Command("settings"))
+async def cmd_settings(message: Message) -> None:
+    """
+    Settings command - show processing mode selection.
     
-    conn = None
+    Args:
+        message: Incoming message from user
+    """
     try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res:
-            current_style = res[0]
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
-
-    await callback.message.edit_text(lang_dict["choose_lang"], reply_markup=get_languages_keyboard(current_style, user_lang), parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "back_to_styles")
-async def back_to_styles(callback: CallbackQuery):
-    if not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
-        await callback.answer("❌ Error", show_alert=True)
-        return
-    user_id = callback.message.chat.id
-    user_lang = callback.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    current_style = "summary"
-    
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res:
-            current_style = res[0]
-    except Exception as e:
-        logger.error(f"Ошибка: {e}")
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
-
-    await callback.message.edit_text(
-        lang_dict["welcome"].format(name=callback.from_user.first_name or "Friend"), 
-        reply_markup=get_main_keyboard(current_style, user_lang), parse_mode="HTML"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("set_style:"))
-async def process_style_callback(callback: CallbackQuery):
-    if not callback.data or not callback.message or not isinstance(callback.message, Message) or not callback.message.chat:
-        await callback.answer("❌ Error", show_alert=True)
-        return
-    style_name = callback.data.split(":")[1]
-    user_id = callback.message.chat.id
-    user_lang = callback.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    
-    style_titles_short = {
-        "summary": lang_dict["btn_summary"], "creative": lang_dict["btn_creative"],
-        "meeting": lang_dict["btn_meeting"], "insider": lang_dict["btn_insider"], "editor": lang_dict["btn_editor"],
-        "opponent": lang_dict["btn_opponent"], "diary": lang_dict["btn_diary"],
-        "lang_ua": "🇺🇦 UA", "lang_en": "🇬🇧 EN", "lang_de": "🇩🇪 DE",
-        "lang_fr": "🇫🇷 FR", "lang_es": "🇪🇸 ES", "lang_it": "🇮🇹 IT"
-    }
-    
-    selected_short = style_titles_short.get(style_name, lang_dict["btn_summary"])
-    selected_full = lang_dict.get(f"style_{style_name}", lang_dict["style_summary"])
-    
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("UPDATE users SET ai_style = %s WHERE telegram_id = %s", (style_name, user_id))
-        conn.commit()
-        cur.close()
-        
-        commands = [
-            BotCommand(command="/start", description=lang_dict["menu_desc_start"]),
-            BotCommand(command="/balance", description=lang_dict["menu_desc_balance"]),
-            BotCommand(command="/settings", description=f"[{selected_short}] {lang_dict['menu_desc_settings']} ⚙️")
-        ]
-        await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
-        
-        await callback.answer(f"{selected_short}")
-        await callback.message.answer(lang_dict["status_changed"].format(style=selected_full), parse_mode="HTML")
-        
-        if style_name.startswith("lang_"):
-            await callback.message.edit_reply_markup(reply_markup=get_languages_keyboard(style_name, user_lang))
-        else:
-            await callback.message.edit_reply_markup(reply_markup=get_main_keyboard(style_name, user_lang))
-            
-    except Exception as e:
-        logger.error(f"Ошибка смены стиля: {e}")
-        await callback.answer(lang_dict["db_error"])
-    finally:
-        if conn and db_pool:
-            db_pool.putconn(conn)
-
-# ==========================================
-# ПАНЕЛЬ АДМИНИСТРАТОРА
-# ==========================================
-
-@dp.message(Command("admin_stats"))
-async def cmd_admin_stats(message: Message):
-    if not message.from_user or message.from_user.id != ADMIN_ID: 
-        return
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM users;")
-        total_users = cur.fetchone()[0]
-        cur.execute("SELECT SUM(balance_minutes) FROM users;")
-        total_minutes = cur.fetchone()[0] or 0
-        cur.close()
-        
-        await message.answer(f"📊 <b>Статистика QuickSay Bot</b>\n\n👥 Всего в БД: <code>{total_users}</code>\n⏳ Общий баланс: <code>{total_minutes} мин.</code>", parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Ошибка админ-статистики: {e}")
-        await message.answer("❌ Ошибка статистики.")
-    finally:
-        if conn and db_pool: 
-            db_pool.putconn(conn)
-
-@dp.message(Command("add_minutes"))
-async def cmd_add_minutes(message: Message):
-    if not message.from_user or message.from_user.id != ADMIN_ID: 
-        return
-    
-    args = (message.text or "").split()
-    if len(args) != 3:
-        await message.answer("⚠️ Формат: <code>/add_minutes [ID] [Минуты]</code>", parse_mode="HTML")
-        return
-        
-    try: 
-        target_user_id = int(args[1])
-        minutes_to_add = int(args[2])
-    except ValueError:
-        await message.answer("⚠️ ID пользователя и минуты должны быть целыми числами!")
-        return
-
-    conn = None
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        
-        cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s;", (target_user_id,))
-        if not cur.fetchone():
-            await message.answer("❌ Нет такого юзера в БД.")
-            cur.close()
+        if not message.from_user:
+            logger.warning("Received /settings from anonymous user")
             return
-            
-        cur.execute("UPDATE users SET balance_minutes = balance_minutes + %s WHERE telegram_id = %s;", (minutes_to_add, target_user_id))
-        conn.commit()
-        cur.close()
         
-        await message.answer(f"✅ Пользователю <code>{target_user_id}</code> начислено: <b>+{minutes_to_add} мин.</b>", parse_mode="HTML")
+        user_id: int = message.chat.id
+        user_lang: str = message.from_user.language_code or "en"
+        lang_dict = get_lang(user_lang)
+        current_style: str = "summary"
         
-        try: 
-            await bot.send_message(
-                chat_id=target_user_id, 
-                text=f"🎁 <b>Вам начислены бонусные минуты!</b>\nБаланс увеличен на: <b>+{minutes_to_add} мин.</b>", 
-                parse_mode="HTML"
-            )
-        except Exception as msg_err:
-            logger.warning(f"Не удалось отправить сообщение пользователю {target_user_id}: {msg_err}")
+        # Get user's current style from database
+        conn = None
+        try:
+            if db_pool is None:
+                logger.error(f"Database pool not initialized for user {user_id}")
+                return
             
-    except Exception as e:
-        logger.error(f"Ошибка SQL при добавлении минут: {e}")
-        await message.answer("❌ Ошибка SQL при выполнении операции.")
-    finally:
-        if conn and db_pool: 
-            db_pool.putconn(conn)
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res:
+                current_style = res[0]
+                logger.debug(f"Retrieved style '{current_style}' for user {user_id}")
+        except PostgresError as e:
+            logger.error(f"Database error getting style for user {user_id}: {e}")
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
 
-# ==========================================
-# ОБРАБОТКА МЕДИАФАЙЛОВ
-# ==========================================
-
-@dp.message(F.voice | F.audio | F.video | F.video_note)
-async def handle_media(message: Message):
-    user_id = message.chat.id
-    if not message.from_user:
-        return
-    
-    user_lang = message.from_user.language_code or "en"
-    lang_dict = get_lang(user_lang)
-    conn = None
-    user_style = "summary"
-    balance_minutes = 0
-    
-    # 1. Запрашиваем стиль и текущий баланс за один SQL-запрос
-    try:
-        assert db_pool is not None
-        conn = db_pool.getconn()
-        cur = conn.cursor()
-        cur.execute("SELECT ai_style, balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
-        res = cur.fetchone()
-        cur.close()
-        if res: 
-            user_style = res[0]
-            balance_minutes = res[1]
-    except Exception as e:
-        logger.error(f"Ошибка получения профиля: {e}")
-    finally:
-        if conn and db_pool: 
-            db_pool.putconn(conn)
-            
-    # 2. КРИТИЧЕСКИЙ БАРЬЕР: Блокируем обработку, если баланс на нуле
-    if balance_minutes < 1:
         await message.answer(
-            lang_dict["balance_msg"].format(minutes=balance_minutes),
+            lang_dict.get("settings_title", "Choose mode:"), 
+            reply_markup=get_main_keyboard(current_style, user_lang), 
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in /settings command: {e}", exc_info=True)
+        try:
+            await message.answer("❌ Error loading settings.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
+
+@dp.message(Command("balance"))
+async def cmd_balance(message: Message) -> None:
+    """
+    Balance command - show user's current balance.
+    
+    Args:
+        message: Incoming message from user
+    """
+    try:
+        if not message.from_user:
+            logger.warning("Received /balance from anonymous user")
+            return
+        
+        user_id: int = message.chat.id
+        user_lang: str = message.from_user.language_code or "en"
+        lang_dict = get_lang(user_lang)
+        balance_minutes: int = 0
+        
+        # Get balance from database
+        conn = None
+        try:
+            if db_pool is None:
+                logger.error(f"Database pool not initialized for user {user_id}")
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res:
+                balance_minutes = res[0]
+                logger.debug(f"Retrieved balance {balance_minutes} minutes for user {user_id}")
+        except PostgresError as e:
+            logger.error(f"Database error getting balance for user {user_id}: {e}")
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
+                
+        await message.answer(
+            lang_dict.get("balance_msg", "Balance: {minutes} min.").format(minutes=balance_minutes),
             reply_markup=get_billing_keyboard(user_lang),
             parse_mode="HTML"
         )
-        return
-
-    # 3. Валидация медиа-типа
-    if message.voice: file_id, file_ext = message.voice.file_id, "ogg"
-    elif message.audio: file_id, file_ext = message.audio.file_id, "mp3"
-    elif message.video: file_id, file_ext = message.video.file_id, "mp4"
-    elif message.video_note: file_id, file_ext = message.video_note.file_id, "mp4"
-    else: return
-
-    # 4. Если баланс ОК — скачиваем файл
-    await message.answer(lang_dict["file_received"])
-    try:
-        file_info = await bot.get_file(file_id)
-        if not file_info.file_path:
-            return await message.answer(lang_dict["download_error"])
-        file_path_on_server = os.path.join(DOWNLOAD_DIR, f"{file_id}.{file_ext}")
-        await bot.download_file(file_info.file_path, file_path_on_server)
+        
     except Exception as e:
-        logger.error(f"Ошибка скачивания файла {file_id}: {e}")
-        return await message.answer(lang_dict["download_error"])
-
-    # 5. Делегируем тяжелую работу Celery воркеру
-    process_audio_task.delay(file_path_on_server, user_id, user_style)
-    await message.answer(lang_dict["processing"])
-
-async def set_main_menu(bot_instance: Bot):
-    commands = [
-        BotCommand(command="/start", description="Instruction / Инструкция"),
-        BotCommand(command="/balance", description="Balance / Баланс 💳"),
-        BotCommand(command="/settings", description="Change mode / Настройки ⚙️")
-    ]
-    await bot_instance.set_my_commands(commands)
+        logger.error(f"Error in /balance command: {e}", exc_info=True)
+        try:
+            await message.answer("❌ Error loading balance.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
 
 # ==========================================
-# ИНИЦИАЛИЗАЦИЯ И ЗАПУСК
+# CALLBACK QUERY HANDLERS
 # ==========================================
 
-async def main():
-    global db_pool
-    logger.info("🚀 Запуск супер-комбайна QuickSay...")
+def _get_user_id_and_lang_from_callback(callback: CallbackQuery) -> Tuple[Optional[int], str]:
+    """
+    Safely extract user ID and language from callback query.
     
-    # Безопасное асинхронное подключение к пулу БД с повторными попытками
-    max_retries = 5
-    retry_delay = 5
+    Args:
+        callback: CallbackQuery object
+        
+    Returns:
+        Tuple of (user_id, language_code) or (None, "en") if extraction fails
+    """
+    if not callback.message or not callback.message.chat:
+        logger.warning("Callback has no message or chat info")
+        return None, "en"
+    
+    if not callback.from_user:
+        logger.warning("Callback has no from_user info")
+        return None, "en"
+    
+    user_id = callback.message.chat.id
+    user_lang = callback.from_user.language_code or "en"
+    
+    return user_id, user_lang
+
+@dp.callback_query(F.data == "open_billing")
+async def open_billing_menu(callback: CallbackQuery) -> None:
+    """
+    Handle billing menu open callback.
+    
+    Args:
+        callback: CallbackQuery object
+    """
+    try:
+        # Safe callback message check
+        if not callback.message:
+            logger.warning(f"open_billing callback has no message")
+            await callback.answer("❌ Error: No message", show_alert=True)
+            return
+        
+        user_id, user_lang = _get_user_id_and_lang_from_callback(callback)
+        if user_id is None:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        lang_dict = get_lang(user_lang)
+        balance_minutes: int = 0
+        
+        # Get balance from database
+        conn = None
+        try:
+            if db_pool is None:
+                await callback.answer("❌ Database error", show_alert=True)
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res: 
+                balance_minutes = res[0]
+        except PostgresError as e:
+            logger.error(f"Database error getting balance: {e}")
+            await callback.answer("❌ Database error", show_alert=True)
+            return
+        finally:
+            if conn and db_pool: 
+                db_pool.putconn(conn)
+
+        await callback.message.edit_text(
+            lang_dict.get("balance_msg", "Balance: {minutes} min.").format(minutes=balance_minutes),
+            reply_markup=get_billing_keyboard(user_lang),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in open_billing_menu: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ An error occurred", show_alert=True)
+        except Exception as answer_err:
+            logger.error(f"Failed to send answer: {answer_err}")
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("buy_pack:"))
+async def process_buy_package(callback: CallbackQuery) -> None:
+    """
+    Handle buy package callback.
+    
+    Args:
+        callback: CallbackQuery object
+    """
+    try:
+        # Safe callback message check
+        if not callback.message:
+            logger.warning("buy_pack callback has no message")
+            await callback.answer("❌ Error: No message", show_alert=True)
+            return
+        
+        # Safe callback data check
+        if not callback.data or ":" not in callback.data:
+            logger.warning(f"Invalid buy_pack callback data: {callback.data}")
+            await callback.answer("❌ Invalid action", show_alert=True)
+            return
+        
+        user_id, user_lang = _get_user_id_and_lang_from_callback(callback)
+        if user_id is None:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        lang_dict = get_lang(user_lang)
+        
+        # Parse minutes from callback data
+        try:
+            minutes_pack = int(callback.data.split(":")[1])
+        except (IndexError, ValueError) as e:
+            logger.warning(f"Failed to parse minutes from callback data '{callback.data}': {e}")
+            await callback.answer("❌ Invalid data format", show_alert=True)
+            return
+        
+        await callback.answer("⏳ Processing...")
+        
+        # Generate payment link
+        try:
+            pay_url = await generate_payment_link(user_id=user_id, minutes_package=minutes_pack)
+            
+            pay_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=lang_dict.get("btn_pay_now", "Pay Now"), url=pay_url)],
+                [InlineKeyboardButton(text=lang_dict.get("btn_back", "Back"), callback_data="open_billing")]
+            ])
+            
+            await callback.message.edit_text(
+                lang_dict.get("invoice_created", "Invoice created!"),
+                reply_markup=pay_kb,
+                parse_mode="HTML"
+            )
+            logger.info(f"Payment link created for user {user_id}, {minutes_pack} min")
+        except Exception as e:
+            logger.error(f"Error creating payment link for user {user_id}: {e}", exc_info=True)
+            try:
+                await callback.message.answer(lang_dict.get("db_error", "❌ Database error"))
+            except Exception as send_err:
+                logger.error(f"Failed to send error message: {send_err}")
+                
+    except Exception as e:
+        logger.error(f"Error in process_buy_package: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ An error occurred", show_alert=True)
+        except Exception as answer_err:
+            logger.error(f"Failed to send answer: {answer_err}")
+
+@dp.callback_query(F.data == "open_languages")
+async def open_languages_menu(callback: CallbackQuery) -> None:
+    """
+    Handle languages menu open callback.
+    
+    Args:
+        callback: CallbackQuery object
+    """
+    try:
+        # Safe callback message check
+        if not callback.message:
+            logger.warning("open_languages callback has no message")
+            await callback.answer("❌ Error: No message", show_alert=True)
+            return
+        
+        user_id, user_lang = _get_user_id_and_lang_from_callback(callback)
+        if user_id is None:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        lang_dict = get_lang(user_lang)
+        current_style: str = "summary"
+        
+        # Get current style from database
+        conn = None
+        try:
+            if db_pool is None:
+                await callback.answer("❌ Database error", show_alert=True)
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res:
+                current_style = res[0]
+        except PostgresError as e:
+            logger.error(f"Database error getting style: {e}")
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
+
+        await callback.message.edit_text(
+            lang_dict.get("choose_lang", "Choose language:"), 
+            reply_markup=get_languages_keyboard(current_style, user_lang), 
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in open_languages_menu: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ An error occurred", show_alert=True)
+        except Exception as answer_err:
+            logger.error(f"Failed to send answer: {answer_err}")
+
+@dp.callback_query(F.data == "back_to_styles")
+async def back_to_styles(callback: CallbackQuery) -> None:
+    """
+    Handle back to styles button callback.
+    
+    Args:
+        callback: CallbackQuery object
+    """
+    try:
+        # Safe callback message check
+        if not callback.message:
+            logger.warning("back_to_styles callback has no message")
+            await callback.answer("❌ Error: No message", show_alert=True)
+            return
+        
+        user_id, user_lang = _get_user_id_and_lang_from_callback(callback)
+        if user_id is None:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        if not callback.from_user:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        lang_dict = get_lang(user_lang)
+        current_style: str = "summary"
+        
+        # Get current style from database
+        conn = None
+        try:
+            if db_pool is None:
+                await callback.answer("❌ Database error", show_alert=True)
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT ai_style FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res:
+                current_style = res[0]
+        except PostgresError as e:
+            logger.error(f"Database error getting style: {e}")
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
+
+        user_name = callback.from_user.first_name or "Friend"
+        await callback.message.edit_text(
+            lang_dict.get("welcome", "Welcome!").format(name=user_name), 
+            reply_markup=get_main_keyboard(current_style, user_lang), 
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Error in back_to_styles: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ An error occurred", show_alert=True)
+        except Exception as answer_err:
+            logger.error(f"Failed to send answer: {answer_err}")
+
+@dp.callback_query(F.data.startswith("set_style:"))
+async def process_style_callback(callback: CallbackQuery) -> None:
+    """
+    Handle style selection callback.
+    
+    Args:
+        callback: CallbackQuery object
+    """
+    try:
+        # Safe callback data and message check
+        if not callback.data or ":" not in callback.data:
+            logger.warning(f"Invalid set_style callback data: {callback.data}")
+            await callback.answer("❌ Invalid action", show_alert=True)
+            return
+        
+        if not callback.message:
+            logger.warning("set_style callback has no message")
+            await callback.answer("❌ Error: No message", show_alert=True)
+            return
+        
+        style_name: str = callback.data.split(":")[1]
+        user_id, user_lang = _get_user_id_and_lang_from_callback(callback)
+        if user_id is None:
+            await callback.answer("❌ Error: Cannot identify user", show_alert=True)
+            return
+        
+        lang_dict = get_lang(user_lang)
+        
+        style_titles_short = {
+            "summary": lang_dict.get("btn_summary", "📝"), 
+            "creative": lang_dict.get("btn_creative", "🎨"),
+            "meeting": lang_dict.get("btn_meeting", "💼"), 
+            "insider": lang_dict.get("btn_insider", "⚡"),
+            "editor": lang_dict.get("btn_editor", "✍️"),
+            "opponent": lang_dict.get("btn_opponent", "🧠"), 
+            "diary": lang_dict.get("btn_diary", "🌱"),
+            "lang_ua": "🇺🇦 UA", "lang_en": "🇬🇧 EN", "lang_de": "🇩🇪 DE",
+            "lang_fr": "🇫🇷 FR", "lang_es": "🇪🇸 ES", "lang_it": "🇮🇹 IT"
+        }
+        
+        selected_short = style_titles_short.get(style_name, "📝")
+        selected_full = lang_dict.get(f"style_{style_name}", lang_dict.get("style_summary", "Summary"))
+        
+        # Update style in database
+        conn = None
+        try:
+            if db_pool is None:
+                await callback.answer("❌ Database error", show_alert=True)
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("UPDATE users SET ai_style = %s WHERE telegram_id = %s", (style_name, user_id))
+            conn.commit()
+            cur.close()
+            logger.info(f"User {user_id} changed style to '{style_name}'")
+            
+            # Update bot commands
+            try:
+                commands = [
+                    BotCommand(command="/start", description=lang_dict.get("menu_desc_start", "Start")),
+                    BotCommand(command="/balance", description=lang_dict.get("menu_desc_balance", "Balance")),
+                    BotCommand(command="/settings", description=f"[{selected_short}] {lang_dict.get('menu_desc_settings', 'Settings')} ⚙️")
+                ]
+                await bot.set_my_commands(commands, scope=BotCommandScopeChat(chat_id=user_id))
+            except Exception as cmd_err:
+                logger.warning(f"Failed to update commands for user {user_id}: {cmd_err}")
+            
+            await callback.answer(f"{selected_short}")
+            await callback.message.answer(
+                lang_dict.get("status_changed", "Done!").format(style=selected_full), 
+                parse_mode="HTML"
+            )
+            
+            # Update keyboard
+            if style_name.startswith("lang_"):
+                await callback.message.edit_reply_markup(
+                    reply_markup=get_languages_keyboard(style_name, user_lang)
+                )
+            else:
+                await callback.message.edit_reply_markup(
+                    reply_markup=get_main_keyboard(style_name, user_lang)
+                )
+                
+        except PostgresError as e:
+            logger.error(f"Database error changing style for user {user_id}: {e}")
+            await callback.answer("❌ Database error", show_alert=True)
+        finally:
+            if conn and db_pool:
+                db_pool.putconn(conn)
+                
+    except Exception as e:
+        logger.error(f"Error in process_style_callback: {e}", exc_info=True)
+        try:
+            await callback.answer("❌ An error occurred", show_alert=True)
+        except Exception as answer_err:
+            logger.error(f"Failed to send answer: {answer_err}")
+
+# ==========================================
+# ADMIN PANEL
+# ==========================================
+
+@dp.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message) -> None:
+    """
+    Admin stats command - show bot statistics.
+    
+    Args:
+        message: Incoming message from user
+    """
+    try:
+        if not message.from_user or message.from_user.id != ADMIN_ID:
+            logger.warning(f"Unauthorized admin access attempt from user {message.from_user.id if message.from_user else 'unknown'}")
+            return
+        
+        conn = None
+        try:
+            if db_pool is None:
+                await message.answer("❌ Database error")
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM users;")
+            total_users = cur.fetchone()[0]
+            cur.execute("SELECT SUM(balance_minutes) FROM users;")
+            total_minutes = cur.fetchone()[0] or 0
+            cur.close()
+            
+            logger.info(f"Admin stats requested: {total_users} users, {total_minutes} total minutes")
+            await message.answer(
+                f"📊 <b>QuickSay Bot Statistics</b>\n\n"
+                f"👥 Total users: <code>{total_users}</code>\n"
+                f"⏳ Total balance: <code>{total_minutes} min.</code>", 
+                parse_mode="HTML"
+            )
+        except PostgresError as e:
+            logger.error(f"Database error getting stats: {e}")
+            await message.answer("❌ Database error.")
+        finally:
+            if conn and db_pool: 
+                db_pool.putconn(conn)
+                
+    except Exception as e:
+        logger.error(f"Error in admin_stats: {e}", exc_info=True)
+        try:
+            await message.answer("❌ An error occurred.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
+
+@dp.message(Command("add_minutes"))
+async def cmd_add_minutes(message: Message) -> None:
+    """
+    Admin command to add minutes to user's balance.
+    Usage: /add_minutes <user_id> <minutes>
+    
+    Args:
+        message: Incoming message from user
+    """
+    try:
+        if not message.from_user or message.from_user.id != ADMIN_ID:
+            logger.warning(f"Unauthorized add_minutes attempt from user {message.from_user.id if message.from_user else 'unknown'}")
+            return
+        
+        args = (message.text or "").split()
+        if len(args) != 3:
+            await message.answer("⚠️ Format: <code>/add_minutes [ID] [Minutes]</code>", parse_mode="HTML")
+            return
+            
+        try: 
+            target_user_id = int(args[1])
+            minutes_to_add = int(args[2])
+        except ValueError:
+            await message.answer("⚠️ User ID and minutes must be integers!")
+            return
+
+        if minutes_to_add <= 0:
+            await message.answer("⚠️ Minutes must be a positive number!")
+            return
+
+        conn = None
+        try:
+            if db_pool is None:
+                await message.answer("❌ Database error")
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            
+            # Check if user exists
+            cur.execute("SELECT balance_minutes FROM users WHERE telegram_id = %s;", (target_user_id,))
+            if not cur.fetchone():
+                await message.answer("❌ User not found in database.")
+                cur.close()
+                return
+                
+            # Add minutes
+            cur.execute(
+                "UPDATE users SET balance_minutes = balance_minutes + %s WHERE telegram_id = %s;", 
+                (minutes_to_add, target_user_id)
+            )
+            conn.commit()
+            cur.close()
+            
+            logger.info(f"Admin {message.from_user.id} added {minutes_to_add} minutes to user {target_user_id}")
+            await message.answer(
+                f"✅ User <code>{target_user_id}</code> received: <b>+{minutes_to_add} min.</b>", 
+                parse_mode="HTML"
+            )
+            
+            # Notify user
+            try: 
+                await bot.send_message(
+                    chat_id=target_user_id, 
+                    text=f"🎁 <b>You received bonus minutes!</b>\n"
+                         f"Balance increased by: <b>+{minutes_to_add} min.</b>", 
+                    parse_mode="HTML"
+                )
+            except Exception as msg_err:
+                logger.warning(f"Failed to notify user {target_user_id}: {msg_err}")
+                
+        except PostgresError as e:
+            logger.error(f"Database error adding minutes: {e}")
+            await message.answer("❌ Database error while executing operation.")
+        finally:
+            if conn and db_pool: 
+                db_pool.putconn(conn)
+                
+    except Exception as e:
+        logger.error(f"Error in add_minutes: {e}", exc_info=True)
+        try:
+            await message.answer("❌ An error occurred.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
+
+# ==========================================
+# MEDIA HANDLING
+# ==========================================
+
+@dp.message(F.voice | F.audio | F.video | F.video_note)
+async def handle_media(message: Message) -> None:
+    """
+    Handle voice messages, audio files, and video notes.
+    Validates balance, downloads media, and delegates to Celery task.
+    
+    Args:
+        message: Incoming message with media
+    """
+    try:
+        if not message.from_user:
+            logger.warning("Received media from anonymous user")
+            return
+        
+        user_id: int = message.chat.id
+        user_lang: str = message.from_user.language_code or "en"
+        lang_dict = get_lang(user_lang)
+        conn = None
+        user_style: str = "summary"
+        balance_minutes: int = 0
+        
+        # Get user profile
+        try:
+            if db_pool is None:
+                await message.answer("❌ Database error")
+                return
+            
+            conn = db_pool.getconn()
+            cur = conn.cursor()
+            cur.execute("SELECT ai_style, balance_minutes FROM users WHERE telegram_id = %s", (user_id,))
+            res = cur.fetchone()
+            cur.close()
+            if res: 
+                user_style = res[0]
+                balance_minutes = res[1]
+                logger.debug(f"Retrieved profile for user {user_id}: style={user_style}, balance={balance_minutes}")
+        except PostgresError as e:
+            logger.error(f"Database error getting user profile: {e}")
+        finally:
+            if conn and db_pool: 
+                db_pool.putconn(conn)
+            
+        # Check balance
+        if balance_minutes < 1:
+            logger.info(f"User {user_id} has insufficient balance: {balance_minutes}")
+            await message.answer(
+                lang_dict.get("balance_msg", "Balance: {minutes} min.").format(minutes=balance_minutes),
+                reply_markup=get_billing_keyboard(user_lang),
+                parse_mode="HTML"
+            )
+            return
+
+        # Determine file type and get file ID
+        file_id: Optional[str] = None
+        file_ext: str = "ogg"
+        
+        if message.voice: 
+            file_id, file_ext = message.voice.file_id, "ogg"
+        elif message.audio: 
+            file_id, file_ext = message.audio.file_id, "mp3"
+        elif message.video: 
+            file_id, file_ext = message.video.file_id, "mp4"
+        elif message.video_note: 
+            file_id, file_ext = message.video_note.file_id, "mp4"
+        
+        if not file_id:
+            logger.warning(f"No file ID extracted for user {user_id}")
+            return
+
+        # Send confirmation message
+        await message.answer(lang_dict.get("file_received", "File received..."))
+        
+        # Download file
+        try:
+            file_info = await bot.get_file(file_id)
+            if not file_info.file_path:
+                logger.error(f"No file path returned for file {file_id}")
+                await message.answer(lang_dict.get("download_error", "❌ Download failed"))
+                return
+            
+            file_path_on_server = os.path.join(DOWNLOAD_DIR, f"{file_id}.{file_ext}")
+            await bot.download_file(file_info.file_path, file_path_on_server)
+            logger.info(f"File {file_id} downloaded successfully for user {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Error downloading file {file_id} for user {user_id}: {e}", exc_info=True)
+            await message.answer(lang_dict.get("download_error", "❌ Download failed"))
+            return
+
+        # Delegate to Celery worker
+        try:
+            process_audio_task.delay(file_path_on_server, user_id, user_style)
+            logger.info(f"Processing task queued for user {user_id}, style={user_style}")
+            await message.answer(lang_dict.get("processing", "⏳ Processing..."))
+        except Exception as e:
+            logger.error(f"Error queuing Celery task for user {user_id}: {e}", exc_info=True)
+            await message.answer(lang_dict.get("db_error", "❌ Error"))
+            
+    except Exception as e:
+        logger.error(f"Error in handle_media: {e}", exc_info=True)
+        try:
+            await message.answer("❌ An error occurred while processing your media.")
+        except Exception as send_err:
+            logger.error(f"Failed to send error message: {send_err}")
+
+async def set_main_menu(bot_instance: Bot) -> None:
+    """
+    Set default bot commands in menu.
+    
+    Args:
+        bot_instance: Bot instance to set commands for
+    """
+    try:
+        commands = [
+            BotCommand(command="/start", description="Instruction / Інструкція"),
+            BotCommand(command="/balance", description="Balance / Баланс 💳"),
+            BotCommand(command="/settings", description="Change mode / Настройки ⚙️")
+        ]
+        await bot_instance.set_my_commands(commands)
+        logger.info("Main menu commands set successfully")
+    except Exception as e:
+        logger.warning(f"Failed to set main menu: {e}")
+
+# ==========================================
+# BOT INITIALIZATION AND STARTUP
+# ==========================================
+
+async def main() -> None:
+    """
+    Main async function - initializes bot and starts polling.
+    """
+    global db_pool
+    logger.info("🚀 Starting QuickSay Bot...")
+    
+    # Initialize database connection pool with retries
+    max_retries: int = 5
+    retry_delay: int = 5
     for attempt in range(1, max_retries + 1):
         try:
             db_pool = ThreadedConnectionPool(minconn=1, maxconn=10, **DB_PARAMS)
-            logger.info("✅ Пул соединений PostgreSQL успешно запущен.")
+            logger.info("✅ PostgreSQL connection pool initialized successfully")
             break
-        except Exception as err:
+        except PostgresError as err:
             if attempt == max_retries:
-                logger.critical(f"❌ Сбой запуска пула БД после {max_retries} попыток: {err}")
+                logger.critical(f"❌ Failed to initialize DB pool after {max_retries} attempts: {err}")
                 raise err
-            logger.info(f"🔄 Попытка переподключения к БД {attempt}/{max_retries} через {retry_delay} сек...")
+            logger.info(f"🔄 Retrying DB connection {attempt}/{max_retries} in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
 
-    # Импортируем функцию создания таблиц из твоего db/database.py прямо здесь
+    # Initialize database tables
     try:
         from db.database import init_db
         init_db()
-        logger.info("✅ База данных и таблицы проверены/инициализированы.")
+        logger.info("✅ Database tables initialized/verified")
     except Exception as e:
-        logger.error(f"⚠️ Предупреждение при инициализации таблиц: {e}")
+        logger.warning(f"⚠️ Warning during database initialization: {e}")
 
+    # Set bot menu and start polling
     await set_main_menu(bot)
     await bot.delete_webhook(drop_pending_updates=True)
+    logger.info("🤖 Bot started polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Бот остановлен.")
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user (KeyboardInterrupt)")
+    except SystemExit:
+        logger.info("🛑 Bot stopped (SystemExit)")
+    except Exception as e:
+        logger.critical(f"💥 Critical error: {e}", exc_info=True)

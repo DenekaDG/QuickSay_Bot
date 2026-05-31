@@ -28,6 +28,8 @@ async def generate_payment_link(user_id: int, minutes_package: int) -> str:
             amount=amount,
             currency_type='fiat',
             description=f"Пополнение баланса QuickSay: {minutes_package} мин.",
+            # Показываем пользователю только две самые популярные монеты:
+            accepted_assets='USDT,TON',
             # КРИТИЧЕСКИ ВАЖНО: передаем данные для вебхука
             payload=f"{user_id}:{minutes_package}"
         )
